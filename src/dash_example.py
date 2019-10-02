@@ -7,9 +7,9 @@ import plotly.graph_objects as go
 import dash_bootstrap_components as dbc
 import logging
 
-from data_loading_functions import get_churn_metrics, \
+from src.data_loading_functions import get_churn_metrics, \
     get_latest_churn_rate, get_normal_churn_rate
-from graphics import performance_metric_dropdown, \
+from src.graphics import performance_metric_dropdown, \
     churn_rate_normal, churn_rate_latest
 
 logging.basicConfig(level=logging.INFO)
