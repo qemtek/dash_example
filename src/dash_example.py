@@ -6,11 +6,10 @@ from dash.dependencies import Input, Output
 import plotly.graph_objects as go
 import dash_bootstrap_components as dbc
 import logging
+import pandas as pd
+import numpy as np
 
-from src.data_loading_functions import get_churn_metrics, \
-    get_latest_churn_rate, get_normal_churn_rate
-from src.graphics import performance_metric_dropdown, \
-    churn_rate_normal, churn_rate_latest
+from src.utils import run_query
 
 logging.basicConfig(level=logging.INFO)
 
@@ -22,27 +21,35 @@ app.config.suppress_callback_exceptions = True
 
 # ========================== Data Retrieval ============================== #
 
-# Set download to true if you want the data to be completely refreshed
-download = False
-# Set debug to True to use data from a previous run instead of downloading (much faster)
-debug = True
-# Define the countries we want data for
-selected_countries = ["ES", "IT", "AR", "PE"]
-# Convert these countries into a comma separated string,
-# which we can inject into a SQL query
-selected_countries_string = "','".join(selected_countries)
-selected_countries_string = "'" + selected_countries_string + "'"
+df = run_query("select * from team_fixtures where season = '19/20'")
+df['date'] = pd.to_datetime(df['date'])
+df = df.sort_values('date')
 
-# Get Country level data
-df_metrics = get_churn_metrics(download=download, debug=debug)
-# Get latest churn rate (customers moving from not churned to churned by week)
-df_churn_rate = get_latest_churn_rate(download=download, debug=debug)
-# Get normal churn rate (% of churned customers in any given week)
-df_churn_rate2 = get_normal_churn_rate(download=download, debug=debug)
+# Create measures of offensive and defensive strength for each team
+offensive_strength = df.groupby('team_name')['goals_for'].mean()
+defensive_strength = 1/df.groupby('team_name')['goals_against'].mean()
+# Normalise
+offensive_strength = offensive_strength/max(offensive_strength)
+defensive_strength = defensive_strength/max(defensive_strength)
+df1 = pd.DataFrame(data=pd.concat([offensive_strength, defensive_strength], axis=1)).reset_index()
+df1.columns = ['team_name', 'offensive_strength', 'defensive_strength']
 
-# Get a list of the countries present in the data (in case there
-# is no data for some of our selected countries)
-available_countries = df_metrics["country_code"].unique()
+# Create a new dataset which looks at the cumulative points of a team
+df2 = pd.concat([df['team_name'], df['date'], df.groupby('team_name')['points'].cumsum()], axis=1)
+
+# ========================== Define Dropdowns ======================== #
+
+def team_selector_dropdown(teams):
+    options = []
+    for team in teams:
+        options.append({'label': team, 'value': team})
+    team_selector_dropdown = dcc.Dropdown(
+        id='team_selector',
+        options=options,
+        placeholder='Arsenal',  # Starting label
+        value='Arsenal'  # Starting value
+    )
+    return team_selector_dropdown
 
 
 # ========================== App Layout ============================== #
@@ -55,27 +62,45 @@ app.layout = html.Div(
         dbc.Row([
             dbc.Col([
                 # html.H1 -> Header
-                html.H1(children="Customer Churn - Model Performance Dashboard"),
+                html.H1(children="Offensive and Defensive Strength - PL 19/20 Season"),
                 # html.Div -> Text paragraph
                 html.Div(
-                    "Welcome to the model performance dashboard for the Customer "
-                    "Churn project. Here you can find all information relating to "
-                    "the performance of the model in each country."
+                    "Included here is a comparison of the offensive and defensive "
+                    "strength of teams so far in the premier league 19/20 season"
                 ),
-                # html.Br -> Empty line
-                html.Br(),
-                # html.H4 -> Smaller header (H1, H2, H3 and H4 are all headers)
-                html.H4(children="Performance Metric Selector"),
                 ])
             ]
         ),
         dbc.Row([
-            dbc.Col(churn_rate_normal(df_churn_rate2, available_countries), width=6),
-            dbc.Col(churn_rate_latest(df_churn_rate, available_countries), width=6)
+            dbc.Col([
+                dcc.Graph(
+                    id='off_def_str',
+                    figure={  # Create the plot here using one of the objects plotly.graph_objects
+                        'data': [go.Scatter(
+                            x=np.array(row[1]['defensive_strength']),
+                            y=np.array(row[1]['offensive_strength']),
+                            mode='markers',
+                            name=row[1]['team_name']
+                        ) for row in df1.iterrows()],
+                        'layout': go.Layout(  # Define things like title and plot dimensions here
+                            title='Offensive vs Defensive Strength',
+                            clickmode='event+select',
+                            height=600
+                        )
+                    })],
+                width=6),
         ]),
         dbc.Row([
-            dbc.Col([performance_metric_dropdown(), html.Br(), dcc.Graph(id="scatter")], width=6)
+            dbc.Col([
+                html.H1('Team Selector'),
+                team_selector_dropdown(list(df1['team_name']))
+            ])
         ]),
+        dbc.Row([
+            dbc.Col([
+                dcc.Graph(id='rolling_points_total')
+            ])
+        ])
     ]
 )
 
@@ -91,24 +116,25 @@ app.layout = html.Div(
 # In the example below we are modifying the 'figure' element of a graph with the id 'scatter' in
 # response to a user selecting something (value) in the dropdown menu with the id 'yaxis'
 
+
 # Metric Type Dropdown
-@app.callback(Output("scatter", "figure"), [Input("yaxis", "value")])
-def update_graphic(yaxis):
-    print(available_countries)
+@app.callback(Output("rolling_points_total", "figure"), [Input("team_selector", "value")])
+def update_graphic(team):
+    df_selected = df2[df2['team_name'] == team].reset_index(drop=True)
+    df_selected = df_selected.sort_values('date')
     return {
         "data": [
             go.Scatter(
-                x=df_metrics[df_metrics["country_code"] == country].index,
-                y=df_metrics[df_metrics["country_code"] == country][yaxis] * 100,
+                x=df_selected['date'],
+                y=df_selected['points'],
                 mode="lines+markers",
-                name=country,
+                name=team,
             )
-            for country in available_countries
         ],
         "layout": go.Layout(
-            title="Model Performance - {}".format(yaxis.capitalize()),
-            xaxis={"title": "Date", "type": "category"},
-            yaxis={"title": yaxis.capitalize() + " [%]", "range": [0, 100]},
+            title="Rolling Points Total - {}".format(team.capitalize()),
+            xaxis={"title": "Date"},
+            yaxis={"title": "Cumulative Points"},
             height=500,
         ),
     }
